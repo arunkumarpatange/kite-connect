@@ -1,3 +1,5 @@
+import sys
+import os
 import hashlib
 import time
 import urlparse
@@ -10,6 +12,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import DataException, NetworkException
 
 # TODO:
 # ADD logger
@@ -17,6 +20,7 @@ from kiteconnect import KiteConnect
 # call instrument list once a day
 # go dormaant after placing order
 
+print_ = lambda d, cr='\n': sys.stdout.write("{}{}".format(d, cr or ''))
 
 class QObject(object):
     '''
@@ -40,9 +44,6 @@ class Kite(object):
             with open('config.yml', 'r') as config:
                 return yaml.load(config)
 
-        #def __getattr__(self, attr):
-        #    return self._YAML.get(attr, None)
-
         def has_changed(self):
             for k, v in self._yaml().iteritems():
                 if getattr(self, k) != v:
@@ -54,20 +55,21 @@ class Kite(object):
 
         xpath_user = "//form[@id='loginform']//input[contains(@name, 'user_id')]"
         xpath_password = "//form[@id='loginform']//input[contains(@name, 'password')]"
-        xpath_question1 = "//form[@id='twofaform']//span[contains(@class, 'first')][contains(text(), '{}')]"
-        xpath_question2 = "//form[@id='twofaform']//span[contains(@class, 'second')][contains(text(), '{}')]"
+        xpath_question1 = '//form[@id="twofaform"]//span[contains(@class, "first")][contains(text(), "{}")]'
+        xpath_question2 = '//form[@id="twofaform"]//span[contains(@class, "second")][contains(text(), "{}")]'
         xpath_answer1 = "//form[@id='twofaform']//input[contains(@name, 'answer1')]"
         xpath_answer2 = "//form[@id='twofaform']//input[contains(@name, 'answer2')]"
         xpath_qa_ok = "//form[@id='twofaform']//button[contains(@type, 'submit')]"
         xpath_submit = "//form[@id='loginform']//button[contains(@type, 'submit')]"
 
+
+
         def __init__(self):
             self.driver = webdriver.PhantomJS()
             self.driver.set_window_size(1120, 550)
-            # driver.quit()
 
         def go(self, url):
-            print url
+            print_(url)
             self.driver.get(url)
             return self
 
@@ -97,11 +99,19 @@ class Kite(object):
             return self.driver.find_element_by_xpath(xpath)
 
         def exit(self):
-            self.driver.close();
+            self.driver.quit();
+            return self
+
+    STATE = [
+        0, # order place
+        1, # delay network gateway down
+        2, # something else
+    ]
 
     def __init__(self):
         self.browser_config()
         self.kite = KiteConnect(api_key=self.config.key)
+        self.orders_placed = {}
 
     def browser_config(self):
         self.browser = self.Browser()
@@ -113,6 +123,7 @@ class Kite(object):
         url = self.browser.login(self.config)
         self.browser.driver.save_screenshot('screen.png')
         request_token = urlparse.parse_qs(urlparse.urlparse(url).query)['request_token'][0]
+
         data = self.kite.request_access_token(request_token, secret=self.config.secret)
         self.kite.set_access_token(data["access_token"])
         return self
@@ -122,7 +133,6 @@ class Kite(object):
             (float(data.last_price) >= float(row.price) and row.transaction_type == 'BUY') or
             float(data.last_price) <= float(row.price) and row.transaction_type == 'SELL'
         ):
-            print data.data
             try:
                 order_id = self.kite.order_place(tradingsymbol=row.trading_symbol,
                                 exchange=self.config.exchange,
@@ -135,34 +145,41 @@ class Kite(object):
                                 stoploss_value=float(row.stoploss_value),
                                 trailing_stoploss=int(row.trailing_stoploss),
                                 tag='AUTO')
-                print("Order placed. ID is", order_id)
+                print_("Order placed. ID is", order_id)
+                return self.STATE[0]
+            except NetworkException as ne:
+                print_("Gateway exception: ", ne.message)
+                return self.STATE[1]
             except Exception as e:
-                print(e)
-                print("Order placement failed", e.message)
+                print_(e)
+                print_(data.data)
+                print_("Order failed", e.message)
+        return self.STATE[2]
 
     def orders(self):
         # Fetch all orders
         return self.kite.orders()
 
     def poll(self):
-        print('polling... ')
+        print_('polling... ')
         while True:
             time.sleep(.5)
             if self.config.has_changed():
-                print('re-config session')
+                print_('re-config session')
+                self.browser.exit()
                 self.browser_config().setup()
             else:
-                print('.')
+                print_('.', cr=None)
+                print
                 with open('trade.csv') as symbols:
                     for row in (QObject(row) for row in csv.DictReader(symbols)):
-                        data = self.kite.quote(exchange=self.config.exchange, tradingsymbol=row.trading_symbol)
-                        self.place_order(row, QObject(data))
+                        try:
+                            if not self.orders_placed.get(row.trading_symbol, False):
+                                data = self.kite.quote(exchange=self.config.exchange, tradingsymbol=row.trading_symbol)
+                                self.orders_placed[row.trading_symbol] = self.place_order(row, QObject(data)) == self.STATE[0]
+                        except DataException as de:
+                            print_(de)
 
-                    #for data in self.kite.instruments(exchange=self.config.exchange):
-                    #    rows = [
-                    #        row for row in trading_symbols if data['tradingsymbol'] == row.trading_symbol
-                    #    ]
-                    #    self.place_order(rows, QObject(data))
 
 
 if __name__ == '__main__':
