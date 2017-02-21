@@ -16,7 +16,7 @@ image:
 	$(HIDE)docker build -f Dockerfile -t $(DOCKER_IMAGE) .
 
 start:
-	$(HIDE)docker run --rm --hostname $(DOCKER_CONTAINER)  --name $(DOCKER_CONTAINER) \
+	$(HIDE)docker run -d --hostname $(DOCKER_CONTAINER)  --name $(DOCKER_CONTAINER) \
 		-v $(PWD):/app \
 		$(DOCKER_IMAGE) \
 		kite.py

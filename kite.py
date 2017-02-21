@@ -20,7 +20,10 @@ from kiteconnect.exceptions import DataException, NetworkException
 # call instrument list once a day
 # go dormaant after placing order
 
-print_ = lambda d, cr='\n': sys.stdout.write("{}{}".format(d, cr or ''))
+def print_(d, cr='\n'):
+    with open('debug.log', 'w') as f:
+        f.write("{}{}".format(d, cr or ''))
+    sys.stdout.write("{}{}".format(d, cr or ''))
 
 class QObject(object):
     '''
