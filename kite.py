@@ -2,6 +2,7 @@ import hashlib
 import time
 import urlparse
 import yaml
+import csv
 import selenium.webdriver.support.expected_conditions as EC
 import selenium.webdriver.support.ui as ui
 
@@ -10,19 +11,55 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from kiteconnect import KiteConnect
 
+# TODO:
+# ADD logger
+# Handle exceptions graciously
+# call instrument list once a day
+# go dormaant after placing order
+
+
+class QObject(object):
+    '''
+        Quick Object Dict
+    '''
+
+    def __init__(self, data):
+        self.data = data
+
+    def __getattr__(self, attr):
+        return self.data.get(attr, None)
+
 class Kite(object):
 
-    class Config(object):
-        _YAML = yaml.load(open('config.yml', 'r'))
-        SECRET = _YAML.get('secret', "avw2brjpvmd6gjwilae0e2eqs2gjr0bq")
-        USER = _YAML.get('user', "avw2brjpvmd6gjwilae0e2eqs2gjr0bq")
-        PASS = _YAML.get('password', "avw2brjpvmd6gjwilae0e2eqs2gjr0bq")
-        Q = _YAML.get('questions', None)
+    class Config(QObject):
 
-        def __getattr__(self, attr):
-            return self._YAML.get(attr, "0b20bsflvqrmgmji")
+        def __init__(self):
+            super(self.__class__, self).__init__(self._yaml())
+
+        def _yaml(self):
+            with open('config.yml', 'r') as config:
+                return yaml.load(config)
+
+        #def __getattr__(self, attr):
+        #    return self._YAML.get(attr, None)
+
+        def has_changed(self):
+            for k, v in self._yaml().iteritems():
+                if getattr(self, k) != v:
+                    return True
+            return False
+
 
     class Browser(object):
+
+        xpath_user = "//form[@id='loginform']//input[contains(@name, 'user_id')]"
+        xpath_password = "//form[@id='loginform']//input[contains(@name, 'password')]"
+        xpath_question1 = "//form[@id='twofaform']//span[contains(@class, 'first')][contains(text(), '{}')]"
+        xpath_question2 = "//form[@id='twofaform']//span[contains(@class, 'second')][contains(text(), '{}')]"
+        xpath_answer1 = "//form[@id='twofaform']//input[contains(@name, 'answer1')]"
+        xpath_answer2 = "//form[@id='twofaform']//input[contains(@name, 'answer2')]"
+        xpath_qa_ok = "//form[@id='twofaform']//button[contains(@type, 'submit')]"
+        xpath_submit = "//form[@id='loginform']//button[contains(@type, 'submit')]"
 
         def __init__(self):
             self.driver = webdriver.PhantomJS()
@@ -30,15 +67,27 @@ class Kite(object):
             # driver.quit()
 
         def go(self, url):
+            print url
             self.driver.get(url)
             return self
 
         def login(self, config):
-            print self.driver.current_url
-            self._text("//form[@id='loginform']//input[contains(@name, 'user_id')]", config.user)
-            self._text("//form[@id='loginform']//input[contains(@name, 'password')]", config.password)
-            self.by_xpath("//form[@id='loginform']//button[contains(@type, 'submit')]").click()
-            return self.driver.current_url 
+            self._text(self.xpath_user, config.user)
+            self._text(self.xpath_password, config.password)
+            self.by_xpath(self.xpath_submit).click()
+            self.set_answers(config)
+            return self.driver.current_url
+
+        def set_answers(self, config):
+            for _xpath, _xpath_answer in ((self.xpath_question1, self.xpath_answer1), (self.xpath_question2, self.xpath_answer2)):
+                for qa in config.questions:
+                    for q, answer in qa.iteritems():
+                        try:
+                            self.by_xpath(_xpath.format(q))
+                            self._text(_xpath_answer, answer)
+                        except Exception as e:
+                            continue
+            self.by_xpath(self.xpath_qa_ok).click()
 
         def _text(self, xpath, text):
             self.by_xpath(xpath).clear()
@@ -47,64 +96,73 @@ class Kite(object):
         def by_xpath(self, xpath, timeout=5):
             return self.driver.find_element_by_xpath(xpath)
 
+        def exit(self):
+            self.driver.close();
 
     def __init__(self):
-        self.browser = self.Browser()
-        self.config = self.Config()
+        self.browser_config()
         self.kite = KiteConnect(api_key=self.config.key)
 
-    def setup(self):
+    def browser_config(self):
+        self.browser = self.Browser()
+        self.config = self.Config()
+        return self
 
+    def setup(self):
         self.browser.go(self.kite.login_url())
         url = self.browser.login(self.config)
         self.browser.driver.save_screenshot('screen.png')
-        request_token = urlparse.parse_qs(urlparse.urlparse(url).query)['request_token']
-        request_token = input()
-        print(request_token)
+        request_token = urlparse.parse_qs(urlparse.urlparse(url).query)['request_token'][0]
         data = self.kite.request_access_token(request_token, secret=self.config.secret)
         self.kite.set_access_token(data["access_token"])
         return self
 
-    def place_order(self):
-        # Place an order
-        try:
-            # if 9844
-            order_id = kite.order_place(tradingsymbol="INFY",
-                            exchange="NSE",
-                            transaction_type="BUY",
-                            quantity=1,
-                            order_type="MARKET",
-                            product="NRML")
-
-            print("Order placed. ID is", order_id)
-        except Exception as e:
-            print("Order placement failed", e.message)
+    def place_order(self, row, data):
+        if (
+            (float(data.last_price) >= float(row.price) and row.transaction_type == 'BUY') or
+            float(data.last_price) <= float(row.price) and row.transaction_type == 'SELL'
+        ):
+            print data.data
+            try:
+                order_id = self.kite.order_place(tradingsymbol=row.trading_symbol,
+                                exchange=self.config.exchange,
+                                transaction_type=row.transaction_type,
+                                quantity=int(row.quantity),
+                                order_type="LIMIT",
+                                product="BO",
+                                price=float(row.price),
+                                squareoff_value=float(row.squareoff_value),
+                                stoploss_value=float(row.stoploss_value),
+                                trailing_stoploss=int(row.trailing_stoploss),
+                                tag='AUTO')
+                print("Order placed. ID is", order_id)
+            except Exception as e:
+                print(e)
+                print("Order placement failed", e.message)
 
     def orders(self):
         # Fetch all orders
         return self.kite.orders()
 
     def poll(self):
-        print('polling.')
+        print('polling... ')
         while True:
             time.sleep(.5)
-            print('.')
-            _seg = []
-            count = 0
-            for data in self.kite.instruments(exchange='NFO'):
-                # print(data['name'], data['instrument_type'])
-                _seg.append(data['segment'])
-                if data["name"] in [
-                    'INFY',
-                    'SHEELA FOAM',
-                ] or 'NFO-FUT' in data['segment']:
-                    print(data)
-                    count = count + 1
-                    print(count)
+            if self.config.has_changed():
+                print('re-config session')
+                self.browser_config().setup()
             else:
-                print({s for s in _seg})
-                print(data)
-            # print(self.orders())
+                print('.')
+                with open('trade.csv') as symbols:
+                    for row in (QObject(row) for row in csv.DictReader(symbols)):
+                        data = self.kite.quote(exchange=self.config.exchange, tradingsymbol=row.trading_symbol)
+                        self.place_order(row, QObject(data))
+
+                    #for data in self.kite.instruments(exchange=self.config.exchange):
+                    #    rows = [
+                    #        row for row in trading_symbols if data['tradingsymbol'] == row.trading_symbol
+                    #    ]
+                    #    self.place_order(rows, QObject(data))
 
 
 if __name__ == '__main__':
