@@ -1,0 +1,8 @@
+key: key
+secret: secret
+user: user
+password: password
+questions:
+  - "Q! do you live on?": "Answer"
+  - "Q! ce?": "answer"
+exchange: NFO

@@ -1,3 +1,4 @@
 *.log
 *.png
 venv
+config.yml
